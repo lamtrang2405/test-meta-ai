@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from typing import Any
+from streamlit.errors import StreamlitSecretNotFoundError
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -21,9 +22,15 @@ TMP_ROOT = Path(tempfile.gettempdir()) / "tribev2_streamlit"
 
 
 def get_config() -> dict[str, str]:
+    def _get_secret(key: str, default: str) -> str:
+        try:
+            return str(st.secrets.get(key, default))
+        except StreamlitSecretNotFoundError:
+            return default
+
     return {
-        "model_repo": st.secrets.get("MODEL_REPO", "facebook/tribev2"),
-        "cache_subdir": st.secrets.get("CACHE_SUBDIR", "cache"),
+        "model_repo": _get_secret("MODEL_REPO", "facebook/tribev2"),
+        "cache_subdir": _get_secret("CACHE_SUBDIR", "cache"),
     }
 
 

@@ -38,7 +38,15 @@ from torch.utils.data import DataLoader
 
 from .eventstransforms import *  # register custom events transforms in neuralset
 from .model import *  # register custom models in neuraltrain
-from .studies import *  # register studies
+try:
+    from .studies import *  # register studies
+except (RuntimeError, ValueError) as exc:
+    # Streamlit/live-reload environments can import this module multiple times.
+    # Ignore duplicate-registration collisions while keeping other errors visible.
+    msg = str(exc)
+    if "already registered" not in msg and "Study name collision" not in msg:
+        raise
+    logging.getLogger(__name__).debug("Skipping duplicate study registration: %s", exc)
 from .utils import (
     MultiStudyLoader,
     set_study_in_average_subject_mode,
