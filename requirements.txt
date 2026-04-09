@@ -1,7 +1,7 @@
 streamlit==1.50.0
 moviepy==2.2.1
-torch==2.6.0
-torchvision==0.21.0
+torch==2.9.0
+torchvision==0.24.0
 numpy==2.0.2
 pandas==2.2.3
 x-transformers==1.27.20
