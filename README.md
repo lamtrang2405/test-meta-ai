@@ -14,6 +14,19 @@
 
 TRIBE v2 is a deep multimodal brain encoding model that predicts fMRI brain responses to naturalistic stimuli (video, audio, text). It combines state-of-the-art text, audio and video models into a unified Transformer architecture that maps multimodal representations onto the cortical surface.
 
+## Web Demo Deployment
+
+- Streamlit app entry: `app.py`
+- GitHub Pages landing: `docs/index.html`
+- Pages deployment workflow: `.github/workflows/pages.yml`
+
+### Run locally
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
 ## Quick start
 
 Load a pretrained model from HuggingFace and predict brain responses to a video:
