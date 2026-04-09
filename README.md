@@ -19,6 +19,7 @@ TRIBE v2 is a deep multimodal brain encoding model that predicts fMRI brain resp
 - Streamlit app entry: `app.py`
 - GitHub Pages landing: `docs/index.html`
 - Pages deployment workflow: `.github/workflows/pages.yml`
+- Keep-awake workflow: `.github/workflows/keepalive-streamlit.yml`
 
 ### Run locally
 
@@ -26,6 +27,24 @@ TRIBE v2 is a deep multimodal brain encoding model that predicts fMRI brain resp
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+Optional model pre-warm at app boot (reduces first-click delay by moving work to startup):
+
+```bash
+TRIBEV2_PREWARM_MODEL=1 streamlit run app.py
+```
+
+### Uptime and load-time notes
+
+- The app now caches the loaded model with Streamlit resource caching, so warm runs avoid repeated model loads.
+- A scheduled GitHub Actions job pings `https://test-meta-ai.streamlit.app/` every 15 minutes to keep the service warm.
+- This is best-effort only: occasional downtime/cold starts can still happen on Streamlit Cloud.
+
+### Verification checklist
+
+- Cold start check: open the app after idle time and confirm first run is slower but succeeds.
+- Warm check: run again immediately and confirm it skips model reload behavior.
+- Workflow check: verify `Keep Streamlit Warm` runs on schedule in GitHub Actions and reports success.
 
 ## Quick start
 

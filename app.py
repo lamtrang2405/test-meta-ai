@@ -13,10 +13,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import numpy as np
 import pandas as pd
 import streamlit as st
-import torch
-from moviepy import VideoFileClip
-from tribev2 import TribeModel
-from tribev2.demo_utils import get_audio_and_text_events
+from typing import Any
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -223,7 +220,32 @@ def top_drop_transitions(
     return pd.DataFrame(rows)
 
 
-def force_cpu_features(model: TribeModel) -> None:
+def build_analysis_payload(
+    selected_file: Path,
+    arr: np.ndarray,
+    summary: str,
+    hi_df: pd.DataFrame,
+    top_impressive_df: pd.DataFrame,
+    top_drops_df: pd.DataFrame,
+) -> dict:
+    return {
+        "source_file": selected_file.name,
+        "shape": {"segments": int(arr.shape[0]), "vertices": int(arr.shape[1])},
+        "global_stats": {
+            "mean": float(arr.mean()),
+            "std": float(arr.std()),
+            "min": float(arr.min()),
+            "max": float(arr.max()),
+        },
+        "summary": summary,
+        "high_response_windows": hi_df.to_dict(orient="records"),
+        "top_impressive_windows": top_impressive_df.to_dict(orient="records"),
+        "top_drop_transitions": top_drops_df.to_dict(orient="records"),
+        "created_at": datetime.now().isoformat(),
+    }
+
+
+def force_cpu_features(model: Any) -> None:
     for attr in ("audio_feature", "text_feature", "video_feature"):
         try:
             feature = getattr(model.data, attr, None)
@@ -234,7 +256,10 @@ def force_cpu_features(model: TribeModel) -> None:
 
 
 @st.cache_resource(show_spinner=False)
-def load_model(model_repo: str, cache_dir: str) -> TribeModel:
+def load_model(model_repo: str, cache_dir: str) -> Any:
+    """Load and cache model once per server process."""
+    import torch
+    from tribev2 import TribeModel
     # Hard guard against any CUDA selection in downstream libs.
     torch.cuda.is_available = lambda: False
     model = TribeModel.from_pretrained(
@@ -246,8 +271,8 @@ def load_model(model_repo: str, cache_dir: str) -> TribeModel:
     force_cpu_features(model)
     return model
 
-
-def run_inference(model: TribeModel, media_path: Path, upload_dir: Path) -> tuple[np.ndarray, list]:
+def run_inference(model: Any, media_path: Path, upload_dir: Path) -> tuple[np.ndarray, list]:
+    from tribev2.demo_utils import get_audio_and_text_events
     suffix = media_path.suffix.lower()
     if suffix in {".wav", ".mp3", ".flac", ".ogg"}:
         events = pd.DataFrame(
@@ -263,6 +288,8 @@ def run_inference(model: TribeModel, media_path: Path, upload_dir: Path) -> tupl
         )
         events = get_audio_and_text_events(events, audio_only=True)
     elif suffix in {".mp4", ".avi", ".mkv", ".mov", ".webm"}:
+        from moviepy import VideoFileClip
+
         # Convert video to wav and run the audio-only path to avoid video extractor/CUDA paths.
         extracted_wav = upload_dir / f"{media_path.stem}_audio.wav"
         with VideoFileClip(str(media_path)) as video:
@@ -300,12 +327,19 @@ config = get_config()
 CACHE_DIR, UPLOAD_DIR, OUTPUT_DIR = ensure_runtime_dirs(config)
 
 with st.expander("Startup diagnostics", expanded=False):
+    torch_cuda_available = False
+    try:
+        import torch
+
+        torch_cuda_available = bool(torch.cuda.is_available())
+    except Exception:
+        torch_cuda_available = False
     st.write(
         {
             "python": platform.python_version(),
             "streamlit": st.__version__,
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
-            "torch_cuda_available": bool(torch.cuda.is_available()),
+            "torch_cuda_available": torch_cuda_available,
             "tmp_root": str(TMP_ROOT),
             "model_repo": config["model_repo"],
         }
@@ -314,9 +348,22 @@ with st.expander("Startup diagnostics", expanded=False):
 if st.button("Run quick health check"):
     try:
         _ = load_model(config["model_repo"], str(CACHE_DIR))
+        st.session_state["model_warmed"] = True
         st.success("Health check passed: model loads on CPU with current settings.")
     except Exception as exc:
         st.error(f"Health check failed: {exc}")
+
+if "model_warmed" not in st.session_state:
+    st.session_state["model_warmed"] = False
+
+if os.getenv("TRIBEV2_PREWARM_MODEL", "0").lower() in {"1", "true", "yes"} and not st.session_state["model_warmed"]:
+    with st.spinner("Pre-warming model cache..."):
+        try:
+            load_model(config["model_repo"], str(CACHE_DIR))
+            st.session_state["model_warmed"] = True
+            st.caption("Model cache warmed for this server process.")
+        except Exception as e:
+            st.warning(f"Model pre-warm skipped: {e}")
 
 uploaded = st.file_uploader(
     "Choose media file",
@@ -332,9 +379,15 @@ if uploaded is not None:
         st.stop()
 
     if st.button("Run TRIBE v2", type="primary"):
-        with st.spinner("Loading model and running inference..."):
+        model_msg = (
+            "Loading model (cold start) and running inference..."
+            if not st.session_state["model_warmed"]
+            else "Running inference with warm model cache..."
+        )
+        with st.spinner(model_msg):
             try:
                 model = load_model(config["model_repo"], str(CACHE_DIR))
+                st.session_state["model_warmed"] = True
                 preds, segments = run_inference(model, media_path, UPLOAD_DIR)
 
                 out_name = f"{media_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npy"
@@ -489,8 +542,9 @@ else:
             )
             st.dataframe(hi_df, use_container_width=True, height=220, hide_index=True)
             st.write("Most impressive windows (top z-score)")
+            top_impressive_df = top_impressive_segments(mean_over_time, z, seg_times, top_k=5)
             st.dataframe(
-                top_impressive_segments(mean_over_time, z, seg_times, top_k=5),
+                top_impressive_df,
                 use_container_width=True,
                 height=220,
                 hide_index=True,
@@ -500,14 +554,34 @@ else:
                 "Use `time_range` to locate moments in your video/audio."
             )
             st.write("Strongest drop transitions")
+            top_drops_df = top_drop_transitions(mean_over_time, seg_times, top_k=5)
             st.dataframe(
-                top_drop_transitions(mean_over_time, seg_times, top_k=5),
+                top_drops_df,
                 use_container_width=True,
                 height=220,
                 hide_index=True,
             )
             st.caption(
                 "Negative `delta` values mean response dropped from one segment to the next."
+            )
+            analysis_payload = build_analysis_payload(
+                selected_file=selected,
+                arr=arr,
+                summary=summary,
+                hi_df=hi_df,
+                top_impressive_df=top_impressive_df,
+                top_drops_df=top_drops_df,
+            )
+            analysis_json = json.dumps(analysis_payload, indent=2)
+            analysis_name = f"{selected.stem}_analysis.json"
+            st.download_button(
+                "Download analysis (.json)",
+                data=analysis_json,
+                file_name=analysis_name,
+                mime="application/json",
+            )
+            st.caption(
+                "Includes summary stats, high-response windows, top segments, and drop transitions."
             )
 
             top_k = min(8, n_vertices)

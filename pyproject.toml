@@ -23,14 +23,8 @@ dependencies = [
   "pyyaml",
   "moviepy>=2.2.1",
   "huggingface_hub",
-  "gtts",
-  "langdetect",
-  "spacy",
   "soundfile",
-  "pip",
-  "Levenshtein",
   "julius",
-  "transformers"
 ]
 
 [project.urls]

@@ -1,0 +1,22 @@
+name: Keep Streamlit Warm
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping Streamlit app
+        run: |
+          set -euo pipefail
+          URL="https://test-meta-ai.streamlit.app/"
+          echo "Pinging ${URL}"
+          curl -fsSL --max-time 30 --retry 2 --retry-delay 5 "${URL}" > /dev/null
+          echo "Ping succeeded"
