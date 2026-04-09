@@ -1,11 +1,9 @@
-streamlit==1.56.0
+streamlit==1.50.0
 moviepy==2.2.1
 torch==2.6.0
 torchvision==0.21.0
-numpy==2.2.6
-pandas==2.3.2
-neuralset==0.0.2
-neuraltrain==0.0.2
+numpy==2.0.2
+pandas==2.2.3
 x-transformers==1.27.20
 einops==0.8.1
 PyYAML==6.0.2
