@@ -4,6 +4,8 @@ import os
 from datetime import datetime
 import json
 from pathlib import Path
+import platform
+import tempfile
 
 # Disable CUDA before importing torch/tribev2 stacks.
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -18,12 +20,38 @@ from tribev2.demo_utils import get_audio_and_text_events
 
 
 APP_DIR = Path(__file__).resolve().parent
-CACHE_DIR = APP_DIR / "cache"
-UPLOAD_DIR = APP_DIR / "uploads"
-OUTPUT_DIR = APP_DIR / "outputs"
+TMP_ROOT = Path(tempfile.gettempdir()) / "tribev2_streamlit"
 
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+def get_config() -> dict[str, str]:
+    return {
+        "model_repo": st.secrets.get("MODEL_REPO", "facebook/tribev2"),
+        "cache_subdir": st.secrets.get("CACHE_SUBDIR", "cache"),
+    }
+
+
+def ensure_runtime_dirs(config: dict[str, str]) -> tuple[Path, Path, Path]:
+    cache_dir = TMP_ROOT / config["cache_subdir"]
+    upload_dir = TMP_ROOT / "uploads"
+    output_dir = TMP_ROOT / "outputs"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        st.error(f"Could not create runtime folders in temp storage: {exc}")
+        st.stop()
+    return cache_dir, upload_dir, output_dir
+
+
+def save_uploaded_file(uploaded_file, upload_dir: Path) -> Path:
+    safe_name = Path(uploaded_file.name).name
+    media_path = upload_dir / safe_name
+    try:
+        media_path.write_bytes(uploaded_file.getbuffer())
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write uploaded file to temp storage: {exc}") from exc
+    return media_path
 
 
 def contiguous_ranges(indices: np.ndarray) -> list[tuple[int, int]]:
@@ -205,12 +233,13 @@ def force_cpu_features(model: TribeModel) -> None:
             pass
 
 
-def load_model() -> TribeModel:
+@st.cache_resource(show_spinner=False)
+def load_model(model_repo: str, cache_dir: str) -> TribeModel:
     # Hard guard against any CUDA selection in downstream libs.
     torch.cuda.is_available = lambda: False
     model = TribeModel.from_pretrained(
-        "facebook/tribev2",
-        cache_folder=str(CACHE_DIR),
+        model_repo,
+        cache_folder=cache_dir,
         device="cpu",
     )
     # Force CPU on Macs without CUDA.
@@ -218,7 +247,7 @@ def load_model() -> TribeModel:
     return model
 
 
-def run_inference(model: TribeModel, media_path: Path) -> tuple[np.ndarray, list]:
+def run_inference(model: TribeModel, media_path: Path, upload_dir: Path) -> tuple[np.ndarray, list]:
     suffix = media_path.suffix.lower()
     if suffix in {".wav", ".mp3", ".flac", ".ogg"}:
         events = pd.DataFrame(
@@ -235,7 +264,7 @@ def run_inference(model: TribeModel, media_path: Path) -> tuple[np.ndarray, list
         events = get_audio_and_text_events(events, audio_only=True)
     elif suffix in {".mp4", ".avi", ".mkv", ".mov", ".webm"}:
         # Convert video to wav and run the audio-only path to avoid video extractor/CUDA paths.
-        extracted_wav = UPLOAD_DIR / f"{media_path.stem}_audio.wav"
+        extracted_wav = upload_dir / f"{media_path.stem}_audio.wav"
         with VideoFileClip(str(media_path)) as video:
             if video.audio is None:
                 raise ValueError("Video has no audio track.")
@@ -267,6 +296,27 @@ st.set_page_config(page_title="TRIBE v2 Local Runner", layout="centered")
 st.title("TRIBE v2 Local Runner")
 st.write("Upload audio/video, run local inference, and save predictions to `.npy`.")
 st.caption("CPU mode can take a few minutes per file.")
+config = get_config()
+CACHE_DIR, UPLOAD_DIR, OUTPUT_DIR = ensure_runtime_dirs(config)
+
+with st.expander("Startup diagnostics", expanded=False):
+    st.write(
+        {
+            "python": platform.python_version(),
+            "streamlit": st.__version__,
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+            "torch_cuda_available": bool(torch.cuda.is_available()),
+            "tmp_root": str(TMP_ROOT),
+            "model_repo": config["model_repo"],
+        }
+    )
+
+if st.button("Run quick health check"):
+    try:
+        _ = load_model(config["model_repo"], str(CACHE_DIR))
+        st.success("Health check passed: model loads on CPU with current settings.")
+    except Exception as exc:
+        st.error(f"Health check failed: {exc}")
 
 uploaded = st.file_uploader(
     "Choose media file",
@@ -274,15 +324,18 @@ uploaded = st.file_uploader(
 )
 
 if uploaded is not None:
-    media_path = UPLOAD_DIR / uploaded.name
-    media_path.write_bytes(uploaded.getbuffer())
-    st.success(f"Saved upload: {media_path}")
+    try:
+        media_path = save_uploaded_file(uploaded, UPLOAD_DIR)
+        st.success(f"Saved upload: {media_path}")
+    except Exception as exc:
+        st.error(str(exc))
+        st.stop()
 
     if st.button("Run TRIBE v2", type="primary"):
         with st.spinner("Loading model and running inference..."):
             try:
-                model = load_model()
-                preds, segments = run_inference(model, media_path)
+                model = load_model(config["model_repo"], str(CACHE_DIR))
+                preds, segments = run_inference(model, media_path, UPLOAD_DIR)
 
                 out_name = f"{media_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npy"
                 out_path = OUTPUT_DIR / out_name

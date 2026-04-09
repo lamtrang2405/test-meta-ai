@@ -1,15 +1,14 @@
-from pathlib import Path
-
 import app
 
 
 def main() -> None:
-    media = Path("/Users/macos/Documents/Filter/tribev2/first_try_input.wav")
-    model = app.load_model()
-    preds, segments = app.run_inference(model, media)
-    print("SELF-CHECK OK")
-    print("shape:", preds.shape)
-    print("segments:", len(segments))
+    config = app.get_config()
+    cache_dir, _, _ = app.ensure_runtime_dirs(config)
+    model = app.load_model(config["model_repo"], str(cache_dir))
+    print("SELF-CHECK OK: model loaded")
+    print("model_repo:", config["model_repo"])
+    print("cache_dir:", cache_dir)
+    print("model_type:", type(model).__name__)
 
 
 if __name__ == "__main__":
