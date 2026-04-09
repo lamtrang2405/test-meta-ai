@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+import json
 from pathlib import Path
 
 # Disable CUDA before importing torch/tribev2 stacks.
@@ -90,6 +91,110 @@ def compare_runs(a: np.ndarray, b: np.ndarray) -> str:
     )
 
 
+def _as_float_or_none(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def infer_segment_times(segments: list, n_segments: int) -> list[tuple[float | None, float | None]]:
+    """
+    Best-effort extraction of (start, end) time from model segments.
+    Falls back to (None, None) when unavailable.
+    """
+    out: list[tuple[float | None, float | None]] = []
+    for i in range(n_segments):
+        if i >= len(segments):
+            out.append((None, None))
+            continue
+        seg = segments[i]
+        start = end = None
+        if isinstance(seg, dict):
+            for k in ("start", "onset", "t_start", "segment_start"):
+                start = _as_float_or_none(seg.get(k))
+                if start is not None:
+                    break
+            for k in ("end", "offset", "t_end", "segment_end"):
+                end = _as_float_or_none(seg.get(k))
+                if end is not None:
+                    break
+        elif isinstance(seg, (tuple, list)) and len(seg) >= 2:
+            start = _as_float_or_none(seg[0])
+            end = _as_float_or_none(seg[1])
+        out.append((start, end))
+    return out
+
+
+def format_time_range(start: float | None, end: float | None) -> str:
+    def _clock(seconds: float) -> str:
+        total = max(0.0, float(seconds))
+        h = int(total // 3600)
+        m = int((total % 3600) // 60)
+        s = total % 60
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:04.1f}"
+        return f"{m:02d}:{s:04.1f}"
+
+    if start is None and end is None:
+        return "unknown"
+    if start is not None and end is not None:
+        return f"{_clock(start)}-{_clock(end)}"
+    if start is not None:
+        return f"{_clock(start)}-?"
+    return f"?-{_clock(end)}"
+
+
+def top_impressive_segments(
+    mean_over_time: np.ndarray,
+    z: np.ndarray,
+    seg_times: list[tuple[float | None, float | None]],
+    top_k: int = 5,
+) -> pd.DataFrame:
+    n = len(mean_over_time)
+    idx = np.argsort(z)[::-1][: min(top_k, n)]
+    rows = []
+    for rank, i in enumerate(idx, start=1):
+        s, e = seg_times[int(i)] if i < len(seg_times) else (None, None)
+        rows.append(
+            {
+                "rank": rank,
+                "time_range": format_time_range(s, e),
+                "mean_activation": float(mean_over_time[int(i)]),
+                "z_score": float(z[int(i)]),
+                "segment": int(i),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def top_drop_transitions(
+    mean_over_time: np.ndarray,
+    seg_times: list[tuple[float | None, float | None]],
+    top_k: int = 5,
+) -> pd.DataFrame:
+    if len(mean_over_time) < 2:
+        return pd.DataFrame(columns=["from_time", "to_time", "delta", "from_segment", "to_segment"])
+    diff = mean_over_time[1:] - mean_over_time[:-1]
+    drop_idx = np.argsort(diff)[: min(top_k, len(diff))]
+    rows = []
+    for i in drop_idx:
+        s0, e0 = seg_times[int(i)] if i < len(seg_times) else (None, None)
+        s1, e1 = seg_times[int(i + 1)] if i + 1 < len(seg_times) else (None, None)
+        rows.append(
+            {
+                "from_time": format_time_range(s0, e0),
+                "to_time": format_time_range(s1, e1),
+                "delta": float(diff[int(i)]),
+                "from_segment": int(i),
+                "to_segment": int(i + 1),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def force_cpu_features(model: TribeModel) -> None:
     for attr in ("audio_feature", "text_feature", "video_feature"):
         try:
@@ -108,6 +213,7 @@ def load_model() -> TribeModel:
         cache_folder=str(CACHE_DIR),
         device="cpu",
     )
+    # Force CPU on Macs without CUDA.
     force_cpu_features(model)
     return model
 
@@ -181,11 +287,23 @@ if uploaded is not None:
                 out_name = f"{media_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npy"
                 out_path = OUTPUT_DIR / out_name
                 np.save(out_path, preds)
+                sidecar_path = out_path.with_suffix(".segments.json")
+                seg_times = infer_segment_times(segments, int(preds.shape[0]))
+                sidecar_payload = {
+                    "source_media": str(media_path.name),
+                    "created_at": datetime.now().isoformat(),
+                    "n_segments": int(preds.shape[0]),
+                    "segment_times": [
+                        {"segment": int(i), "start": t[0], "end": t[1]} for i, t in enumerate(seg_times)
+                    ],
+                }
+                sidecar_path.write_text(json.dumps(sidecar_payload, indent=2), encoding="utf-8")
 
                 st.success("Inference complete.")
                 st.write(f"Prediction shape: `{preds.shape}`")
                 st.write(f"Segments kept: `{len(segments)}`")
                 st.write(f"Saved output: `{out_path}`")
+                st.write(f"Saved segment metadata: `{sidecar_path}`")
 
                 st.download_button(
                     "Download predictions (.npy)",
@@ -240,6 +358,27 @@ else:
 
             mean_over_time = arr.mean(axis=1)
             z, tiers, summary = summarize_signal(mean_over_time)
+            sidecar = selected.with_suffix(".segments.json")
+            seg_times = [(None, None)] * n_segments
+            if sidecar.exists():
+                try:
+                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                    raw_times = meta.get("segment_times", [])
+                    seg_times = [
+                        (
+                            _as_float_or_none(item.get("start")),
+                            _as_float_or_none(item.get("end")),
+                        )
+                        for item in raw_times[:n_segments]
+                    ]
+                    if len(seg_times) < n_segments:
+                        seg_times.extend([(None, None)] * (n_segments - len(seg_times)))
+                    st.caption(f"Loaded timing metadata from `{sidecar.name}`.")
+                except Exception:
+                    st.caption("Timing metadata found but unreadable; using segment indices only.")
+            else:
+                st.caption("No timing metadata sidecar found; showing segment indices only.")
+                st.caption("Tip: rerun inference with this app version to generate exact time ranges.")
 
             st.markdown("### Interpretation Summary")
             st.write(summary)
@@ -263,11 +402,7 @@ else:
                     "No strong high-response windows in this run; response appears broadly steady."
                 )
             else:
-                consistency = (
-                    "sustained"
-                    if len(contiguous_ranges(high_idx)) < len(high_idx)
-                    else "spiky"
-                )
+                consistency = "sustained" if len(contiguous_ranges(high_idx)) < len(high_idx) else "spiky"
                 st.write(
                     f"High windows suggest salience/novelty or attention-load changes. Pattern appears {consistency}."
                 )
@@ -286,9 +421,10 @@ else:
                 "This trend summarizes global predicted brain response over time. "
                 "Peaks suggest segments with stronger overall activation."
             )
-            st.write("High-response segment table (z-score)")
+            st.write("High-response time-frame table (z-score)")
             hi_df = pd.DataFrame(
                 {
+                    "time_range": [format_time_range(*seg_times[i]) for i in range(n_segments)],
                     "segment": np.arange(n_segments),
                     "z_score": z,
                     "tier": np.where(
@@ -298,7 +434,28 @@ else:
                     ),
                 }
             )
-            st.dataframe(hi_df, use_container_width=True, height=220)
+            st.dataframe(hi_df, use_container_width=True, height=220, hide_index=True)
+            st.write("Most impressive windows (top z-score)")
+            st.dataframe(
+                top_impressive_segments(mean_over_time, z, seg_times, top_k=5),
+                use_container_width=True,
+                height=220,
+                hide_index=True,
+            )
+            st.caption(
+                "These are the strongest global-response windows in this file. "
+                "Use `time_range` to locate moments in your video/audio."
+            )
+            st.write("Strongest drop transitions")
+            st.dataframe(
+                top_drop_transitions(mean_over_time, seg_times, top_k=5),
+                use_container_width=True,
+                height=220,
+                hide_index=True,
+            )
+            st.caption(
+                "Negative `delta` values mean response dropped from one segment to the next."
+            )
 
             top_k = min(8, n_vertices)
             var_idx = np.argsort(arr.var(axis=0))[-top_k:]

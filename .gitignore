@@ -26,6 +26,10 @@ env/
 # Training artifacts
 lightning_logs/
 wandb/
+outputs/
+uploads/
+*.npy
+*.wav
 
 # Testing / type-checking
 .pytest_cache/
